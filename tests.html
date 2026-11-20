@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Instruction Tracker tests</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; padding: 20px; }
+    .pass { color: #006300; } .fail { color: #b42c2c; font-weight: 600; }
+    pre { margin: 0 0 0 16px; color: #52514e; }
+  </style>
+</head>
+<body>
+  <h1>Model tests</h1>
+  <div id="summary"></div>
+  <div id="out"></div>
+  <script type="module">
+    import * as M from './js/model.js';
+    import { MemoryBackend } from './js/demo.js';
+    import { Store } from './js/store.js';
+    import { parseAddress } from './js/graph.js';
+
+    const out = document.getElementById('out');
+    let pass = 0, fail = 0;
+    const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    function t(name, actual, expected) {
+      const ok = eq(actual, expected);
+      ok ? pass++ : fail++;
+      out.insertAdjacentHTML('beforeend', `<div class="${ok ? 'pass' : 'fail'}">${ok ? '✓' : '✗'} ${name}</div>${ok ? '' : `<pre>expected ${JSON.stringify(expected)}\n     got ${JSON.stringify(actual)}</pre>`}`);
+    }
+    const tr = (s) => { const r = M.parseTime(s); return r ? [r.start, r.end, r.guessed] : null; };
+
+    // Time parser: legacy shapes from the workbook (spec §12)
+    t('1-2pm', tr('1-2pm'), [780, 840, false]);
+    t('9:30 -1045', tr('9:30 -1045'), [570, 645, true]);
+    t('12:30- 1-:15', tr('12:30- 1-:15'), [750, 795, true]);
+    t('11-12 pm', tr('11-12 pm'), [660, 720, false]);
+    t('10:00–10:50 AM', tr('10:00–10:50 AM'), [600, 650, false]);
+    t('2:00–3:15 PM', tr('2:00–3:15 PM'), [840, 915, false]);
+    t('6:00–8:30 PM', tr('6:00–8:30 PM'), [1080, 1230, false]);
+    t('10-1pm', tr('10-1pm'), [600, 780, false]);
+    t('Online → needs review', tr('Online'), null);
+    t('TBD w/ prof → needs review', tr('TBD w/ prof'), null);
+    t('Excel fraction 0.052 (1:15, no AM/PM) → 1:15 PM, guessed', tr(0.052), [795, null, true]);
+    t('Excel fraction 0.4375 = 10:30', tr(0.4375), [630, null, false]);
+    t('formatTimeRange same period', M.formatTimeRange(780, 840), '1:00–2:00 PM');
+    t('formatTimeRange across noon', M.formatTimeRange(660, 780), '11:00 AM–1:00 PM');
+
+    // Dates
+    t('Excel serial → ISO', M.toIsoDate(46280), '2026-09-15');
+    t('US text → ISO', M.toIsoDate('9/15/2026'), '2026-09-15');
+    t('0 → blank', M.toIsoDate(0), '');
+    t('ISO → Excel text', M.isoToExcelText('2026-09-05'), '9/5/2026');
+
+    // Normalization and suggestions
+    t('course EN103', M.normalizeCourse('en103'), 'EN 103');
+    t('course PA-517', M.normalizeCourse('PA-517'), 'PA 517');
+    t('location GMB 210', M.normalizeLocation('GMB 210', ['Gmb 210']), 'Gmb 210');
+    t('location dlg 105 (unknown)', M.normalizeLocation('DLG 999'), 'Dlg 999');
+    const lists = { prefixToCollege: { NU: 'School of Nursing', EN: 'Arts' }, graduateThreshold: 500 };
+    t('suggest NU 800', M.suggestFromCourse('NU800', lists), { college: 'School of Nursing', studentType: 'Graduate' });
+    t('suggest EN 103', M.suggestFromCourse('EN 103', lists), { college: 'Arts', studentType: 'Undergraduate' });
+    t('suggest unmapped', M.suggestFromCourse('ZZ 101', lists), { college: '', studentType: 'Undergraduate' });
+    t('term year from sheet', M.termYearFromSheet('FALL 26'), 'Fall 2026');
+    t('prep parse', M.parsePrep('New - 8 hours'), { kind: 'New', hours: 8 });
+    t('prep parse updated', M.parsePrep('updated 1 hour'), { kind: 'Updated', hours: 1 });
+    t('prep format', M.formatPrep('Updated', 1), 'Updated – 1 hour');
+
+    // Header mapping works by name, in any order, including the tours sheet
+    t('mapHeaders', M.mapHeaders(['Notes', 'Date', 'Course #', '_RecordId']), { notes: 0, date: 1, course: 2, id: 3 });
+    t('mapHeaders tours', M.mapHeaders(['Date', 'Time', 'Mentors', 'Trexler Librarian', '# of students']), { date: 0, time: 1, faculty: 2, librarian: 3, expected: 4 });
+
+    // Merge (spec §5)
+    const base = { notes: 'a', librarian: 'Lisa', room: 'Pending' };
+    let m = M.mergeFields(base, { ...base, notes: 'mine' }, { ...base, room: 'Confirmed' });
+    t('merge: different fields merge silently', [m.merged.notes, m.merged.room, m.conflicts.length], ['mine', 'Confirmed', 0]);
+    m = M.mergeFields(base, { ...base, notes: 'mine' }, { ...base, notes: 'theirs' });
+    t('merge: same field conflicts', m.conflicts.map((c) => [c.key, c.mine, c.theirs]), [['notes', 'mine', 'theirs']]);
+    m = M.mergeFields(base, { ...base, notes: 'same' }, { ...base, notes: 'same' });
+    t('merge: same change is not a conflict', m.conflicts.length, 0);
+
+    // Dashboard aggregation with known totals
+    const rec = (f) => ({ kind: 'term', fields: { librarian: '', college: '', studentType: '', format: '', sessionType: '', actual: null, expected: null, date: '2026-10-01', ...f } });
+    const rs = [
+      rec({ librarian: 'Lisa', studentType: 'Graduate', sessionType: 'Workshop', actual: 10, expected: 12 }),
+      rec({ librarian: 'Lisa', studentType: 'Undergraduate', sessionType: 'Presentation', expected: 20 }),
+      rec({ librarian: 'Kathleen', studentType: 'Graduate', sessionType: 'One shot', college: 'Nursing', actual: 5 }),
+      rec({ studentType: '', date: '2026-12-01' }),
+    ];
+    t('groupBy librarian sessions', M.groupBy(rs, (r) => r.fields.librarian || 'Unassigned'), [{ label: 'Lisa', value: 2 }, { label: 'Kathleen', value: 1 }, { label: 'Unassigned', value: 1 }]);
+    t('groupBy librarian students', M.groupBy(rs, (r) => r.fields.librarian || 'Unassigned', 'students'), [{ label: 'Lisa', value: 30 }, { label: 'Kathleen', value: 5 }, { label: 'Unassigned', value: 0 }]);
+    t('workshop+presentation grouped', M.groupBy(rs, (r) => M.DASH_SESSION_TYPE(r.fields.sessionType)).find((x) => x.label === 'Workshop/Presentation').value, 2);
+    t('filter by student type', M.applyFilters(rs, { studentType: new Set(['Graduate']) }).length, 2);
+    t('filter Unassigned bucket', M.applyFilters(rs, { college: new Set(['Unassigned']) }).length, 3);
+    t('period range', M.applyFilters(rs, {}, { from: '2026-11-01', to: '2026-12-31' }).length, 1);
+    const s = M.summarize(rs, '2026-11-20');
+    t('summary', [s.sessions, s.students, s.estimates, s.upcoming], [4, 35, 1, 1]);
+
+    // .ics: stable UID and time zone
+    const ics = M.buildIcs([{ id: 'abc', version: 3, start: 780, end: 840, fields: { date: '2026-10-01', course: 'EN 103', faculty: 'X', sessionType: 'One shot', location: 'Gmb 155' } }]);
+    t('ics uid stable', /UID:abc@/.test(ics), true);
+    t('ics local time with tz', /DTSTART;TZID=America\/New_York:20261001T130000/.test(ics), true);
+    t('ics sequence = row version', /SEQUENCE:3/.test(ics), true);
+
+    // Store: concurrency against the in-memory backend (acceptance A2, A3, A4, A6)
+    const be = new MemoryBackend('2026-11-18');
+    be.delay = 0;
+    const store = new Store(be, { name: 'T', upn: 't@x' });
+    const books = await store.init();
+    const load = async () => (await store.loadBook(books.active)).tables.find((x) => x.sheet === 'FALL 26');
+    let fall = await load();
+    const r0 = fall.records.find((r) => r.fields.date);
+    // PC2 changes Room while PC1 edits Notes → both kept, no dialog (A2)
+    be.simulateColleagueEdit(r0.id, 'Room Reservation Status', 'Confirmed');
+    let res = await store.save('active', r0, r0.fields, { ...r0.fields, notes: 'from PC1' });
+    fall = await load();
+    let now = fall.records.find((r) => r.id === r0.id);
+    t('A2 different fields both kept', [res.status, now.fields.notes, now.fields.room], ['saved', 'from PC1', 'Confirmed']);
+    t('version bumped', now.version, r0.version + 2);
+    // Same field → conflict (A3), then resolve with "mine"
+    be.simulateColleagueEdit(now.id, 'Notes', 'from PC2');
+    res = await store.save('active', now, now.fields, { ...now.fields, notes: 'PC1 again' });
+    t('A3 same field → conflict', [res.status, res.conflicts?.[0]?.theirs], ['conflict', 'from PC2']);
+    res = await store.save('active', now, now.fields, { ...now.fields, notes: 'PC1 again' }, { notes: 'mine' });
+    t('A3 resolved with mine', [res.status, (await load()).records.find((r) => r.id === r0.id).fields.notes], ['saved', 'PC1 again']);
+    // Three adds at once → three unique ids (A4)
+    const before = (await load()).records.length;
+    const ids = await Promise.all([1, 2, 3].map((i) => store.add('active', 'tbl_FALL26', { date: '2026-12-01', course: `EN 10${i}`, faculty: 'Z' })));
+    t('A4 three adds, unique ids', [(await load()).records.length - before, new Set(ids).size], [3, 3]);
+    // Delete while someone edits (A6)
+    const victim = (await load()).records.find((r) => r.id === ids[0]);
+    await store.remove('active', victim);
+    res = await store.save('active', victim, victim.fields, { ...victim.fields, notes: 'x' });
+    t('A6 deleted row reported', res.status, 'deleted');
+    // Move keeps the id
+    const mv = (await load()).records.find((r) => r.id === ids[1]);
+    await store.move('active', mv, 'tbl_SPRING27', 'Spring 2027');
+    const spring = (await store.loadBook(books.active)).tables.find((x) => x.sheet === 'SPRING 27');
+    t('move keeps record id', [spring.records.some((r) => r.id === ids[1]), (await load()).records.some((r) => r.id === ids[1])], [true, false]);
+
+    // ---- Close term and new academic year ----
+    t('nextSheetName', [M.nextSheetName('FALL 26'), M.nextSheetName('SPRING 27'), M.nextSheetName('WINTER 99'), M.nextSheetName('oriet tours')], ['FALL 27', 'SPRING 28', 'WINTER 00', 'oriet tours']);
+    t('nextYearLabel', M.nextYearLabel('2026-2027'), '2027-2028');
+    t('shiftYear leap day', [M.shiftYear('2026-08-24'), M.shiftYear('2028-02-29')], ['2027-08-24', '2029-02-28']);
+
+    let data = await store.loadBook(books.active);
+    t('Lists sheet parsed', [data.hasLists, data.terms.length, data.lock], [true, 4, null]);
+    t('Lists sheet is not a term table', data.tables.some((x) => x.sheet === 'Lists'), false);
+
+    // Close FALL 26 → saves refused, reopen → allowed again
+    await store.setTermClosed(books.active, 'FALL 26', true);
+    data = await store.loadBook(books.active);
+    const fallT = data.tables.find((x) => x.sheet === 'FALL 26');
+    t('term closed', [fallT.closed, fallT.term.closedBy], [true, 't@x']);
+    const fr = fallT.records.find((r) => r.fields.date);
+    let err = null;
+    try { await store.save('active', fr, fr.fields, { ...fr.fields, notes: 'nope' }); } catch (e) { err = e.message; }
+    t('save to closed term refused', /closed/.test(err || ''), true);
+    err = null;
+    try { await store.add('active', 'tbl_FALL26', { date: '2026-12-01', course: 'EN 1', faculty: 'Z' }); } catch (e) { err = e.message; }
+    t('add to closed term refused', /closed/.test(err || ''), true);
+    await store.setTermClosed(books.active, 'FALL 26', false);
+    t('reopened term saves', (await store.save('active', fr, fr.fields, { ...fr.fields, notes: 'ok again' })).status, 'saved');
+
+    // Another PC holds the lock → this PC can't write; the lock holder can
+    const other = new Store(be, { name: 'L', upn: 'lisa@x' });
+    await other.init();
+    await other.acquireLock(books.active, 'Closing a term');
+    data = await store.loadBook(books.active);
+    err = null;
+    try { await store.save('active', fr, fr.fields, { ...fr.fields, notes: 'during lock' }); } catch (e) { err = e.message; }
+    t('locked by other PC → refused', /paused/.test(err || ''), true);
+    err = null;
+    try { await store.acquireLock(books.active, 'Closing a term'); } catch (e) { err = e.message; }
+    t('second lock refused', /already/.test(err || ''), true);
+    await other.releaseLock(books.active);
+    const fr2 = (await store.loadBook(books.active)).records.find((r) => r.id === fr.id);
+    t('after release, save works', (await store.save('active', fr2, fr2.fields, { ...fr2.fields, notes: 'after lock' })).status, 'saved');
+
+    // Start new academic year
+    // Book one session into next fall so there is something to carry over.
+    const futureId = await store.add('active', 'tbl_SUMMER27', { date: '2027-09-14', course: 'EN 103', faculty: 'Future', librarian: 'Lisa' });
+    const plan = {
+      newName: '2027-2028 Instruction Classes.xlsx',
+      closeOpen: true,
+      terms: [
+        { fromSheet: 'FALL 26', sheet: 'FALL 27', termYear: 'Fall 2027', from: '2027-08-23', to: '2027-12-17' },
+        { fromSheet: 'WINTER 26', sheet: 'WINTER 27', termYear: 'Winter 2027', from: '2027-12-18', to: '2028-01-16' },
+        { fromSheet: 'SPRING 27', sheet: 'SPRING 28', termYear: 'Spring 2028', from: '2028-01-17', to: '2028-05-12' },
+        { fromSheet: 'SUMMER 27', sheet: 'SUMMER 28', termYear: 'Summer 2028', from: '2028-05-13', to: '2028-08-21' },
+      ],
+      moveIds: [futureId],
+    };
+    const logLines = [];
+    const after = await store.startNewYear(plan, (m) => logLines.push(m));
+    t('new year is active', [after.active.name, after.archived.map((b) => b.name)], ['2027-2028 Instruction Classes.xlsx', ['2026-2027 Instruction Classes.xlsx', '2025-2026 Instruction Classes.xlsx']]);
+    const ny = await store.loadBook(after.active);
+    t('new sheets renamed', ny.tables.map((x) => `${x.sheet}/${x.table}`), ['FALL 27/tbl_FALL27', 'WINTER 27/tbl_WINTER27', 'SPRING 28/tbl_SPRING28', 'SUMMER 28/tbl_SUMMER28', 'oriet tours/tbl_oriettours']);
+    t('new terms open with new dates', ny.terms.map((x) => [x.sheet, x.from, x.closed]), plan.terms.map((x) => [x.sheet, x.from, false]));
+    t('new workbook unlocked', ny.lock, null);
+    const movedRec = ny.records.find((r) => r.id === futureId);
+    t('booked session carried over (same id, new term)', [movedRec?.sheet, movedRec?.fields.termYear, ny.records.length], ['FALL 27', 'Fall 2027', 1]);
+    const oldBook = after.archived.find((b) => b.name.startsWith('2026'));
+    const od = await store.loadBook(oldBook);
+    t('old year: all terms closed, archived, session removed', [od.terms.every((x) => x.closed), od.lock?.action, od.records.some((r) => r.id === futureId), od.readOnly], [true, 'Archived', false, true]);
+    t('old year keeps its sessions for reporting', od.records.length > 50, true);
+    err = null;
+    try { await store.add(oldBook.id, 'tbl_FALL26', { date: '2026-12-01', course: 'X', faculty: 'Y' }); } catch (e) { err = e.message; }
+    t('archived year refuses writes', /read-only/.test(err || ''), true);
+    const ny2 = await store.add(after.active.id, 'tbl_FALL27', { date: '2027-09-01', course: 'EN 103', faculty: 'New' });
+    t('new year accepts writes', (await store.loadBook(after.active)).records.some((r) => r.id === ny2), true);
+    err = null;
+    try { await store.startNewYear({ ...plan, newName: '2027-2028 Instruction Classes.xlsx' }); } catch (e) { err = e.message; }
+    t('re-running with an existing name stops safely', /already exists/.test(err || ''), true);
+    const ny3 = await store.loadBook(after.active);
+    t('…and leaves the new year unlocked and open', [ny3.lock, ny3.terms.some((x) => x.closed)], [null, false]);
+
+    // ---- Prepare: LibInsight cut, stray column O → Actual Student Attendance, Excel dropdowns (spec §7 steps 4, 5, 8) ----
+    t('legacy header detection', [M.isLibInsightHeader('Entered into LibInsight'), M.isLibInsightHeader('_LegacyLibInsight'), M.isStrayHeader(''), M.isStrayHeader('Column15'), M.isStrayHeader('Notes')], [true, false, true, true, false]);
+    t('appendToNotes', [M.appendToNotes('', 'survey'), M.appendToNotes('Intro', 'survey'), M.appendToNotes('Intro\nsurvey', 'survey'), M.appendToNotes('Intro', '')], ['survey', 'Intro\nsurvey', 'Intro\nsurvey', 'Intro']);
+
+    const pbe = new MemoryBackend('2026-11-18');
+    pbe.delay = 0;
+    // Make FALL 26 look like the real sheet: LibInsight column, and an unlabeled column where Actual Attendance should be.
+    const ft = pbe.books.active.tables.tbl_FALL26;
+    const ai = ft.headers.indexOf('Actual Student Attendance');
+    ft.headers[ai] = 'Column15';
+    ft.rows.forEach((r, i) => (r[ai] = i === 0 ? 'survey created 2 hours' : i === 1 ? 'room changed' : ''));
+    ft.rows[1][ft.headers.indexOf('Notes')] = 'Bring laptops';
+    ft.headers.splice(ai, 0, 'Entered into LibInsight');
+    ft.rows.forEach((r, i) => r.splice(ai, 0, i < 5 ? 'Yes' : ''));
+    const firstId = ft.rows[0][ft.headers.indexOf('_RecordId')];
+    const spt = pbe.books.active.tables.tbl_SPRING27;
+    spt.headers.push('LibInsight entered');
+    spt.rows.forEach((r) => r.push(''));
+    const L = {
+      ...lists, librarians: [{ name: 'Kathleen', color: 1 }, { name: 'Lisa', color: 2 }], sessionTypes: ['One shot', 'Workshop'], sessionFormats: ['Face to face'],
+      roomStatuses: ['Confirmed', 'Pending'], yesNo: ['Yes', 'No'], studentTypes: ['Undergraduate', 'Graduate'], colleges: ['Arts'], locations: ['TTC', 'Library'], terms: [],
+    };
+    const pst = new Store(pbe, { name: 'K', upn: 'k@x' });
+    await pst.init();
+    const rep = await pst.prepare(L);
+    const after1 = pbe.books.active.tables.tbl_FALL26;
+    const hi = (h) => after1.headers.indexOf(h);
+    t('LibInsight renamed to hidden legacy column, values kept', [hi('Entered into LibInsight'), hi('_LegacyLibInsight') === ai, after1.rows.filter((r) => r[hi('_LegacyLibInsight')] === 'Yes').length], [-1, true, 5]);
+    t('stray column became Actual Student Attendance in place (no extra column)', [hi('Actual Student Attendance'), after1.headers.filter((h) => h === 'Actual Student Attendance').length, after1.headers.some(M.isStrayHeader)], [ai + 1, 1, false]);
+    t('stray values appended to Notes, column emptied', [after1.rows[0][hi('Notes')].endsWith('survey created 2 hours'), after1.rows[1][hi('Notes')], after1.rows.every((r) => r[hi('Actual Student Attendance')] === '')], [true, 'Bring laptops\nroom changed', true]);
+    t('report mentions both changes', [rep.some((x) => /LibInsight/.test(x)), rep.some((x) => /appended to Notes/.test(x)), rep.some((x) => /dropdowns/.test(x))], [true, true, true]);
+    const notesBefore = after1.rows.map((r) => r[hi('Notes')]);
+    const rep2 = await pst.prepare(L);
+    t('re-run changes nothing in the columns', [pbe.books.active.tables.tbl_FALL26.headers, pbe.books.active.tables.tbl_FALL26.rows.map((r) => r[hi('Notes')])], [after1.headers, notesBefore]);
+    t('re-run report: only the dropdown refresh and review flags', rep2.filter((x) => !/dropdowns|needs review/.test(x)), []);
+
+    // Dropdowns: each validation points at a Lists range holding exactly that list.
+    const listAt = (bookId, src) => { const a = parseAddress(src.replace(/^=/, '')); return pbe.gridColumn(bookId, 'Lists', a.c0, a.r0, a.r1); };
+    const val = pbe.books.active.validation;
+    t('librarian dropdown', listAt('active', val['tbl_FALL26:Librarian Assigned'].source), ['Kathleen', 'Lisa']);
+    t('term year dropdown from tbl_Terms', listAt('active', val['tbl_SPRING27:Term Year'].source), ['Fall 2026', 'Winter 2026', 'Spring 2027', 'Summer 2027']);
+    t('location only suggests; others warn', [val['tbl_FALL26:Location'].strict, val['tbl_FALL26:Session Type'].strict], [false, true]);
+    t('tours sheet gets the librarian dropdown', !!val['tbl_oriettours:Trexler Librarian'], true);
+    // A shorter list later must not leave stale values below it.
+    await pst.applyDropdowns(pst.books.active, { ...L, librarians: [{ name: 'Michele', color: 3 }] });
+    t('shrunk list replaces the old one', [listAt('active', pbe.books.active.validation['tbl_FALL26:Librarian Assigned'].source), pbe.gridColumn('active', 'Lists', parseAddress(pbe.books.active.validation['tbl_FALL26:Librarian Assigned'].source.slice(1)).c0, 3, 3)], [['Michele'], ['']]);
+
+    // Moving a session keeps its legacy LibInsight value.
+    const pd = await pst.loadBook(pst.books.active);
+    const legacyRec = pd.records.find((r) => r.id === firstId);
+    await pst.move('active', legacyRec, 'tbl_SPRING27', 'Spring 2027');
+    const sp = pbe.books.active.tables.tbl_SPRING27;
+    const movedRow = sp.rows.find((r) => r[sp.headers.indexOf('_RecordId')] === firstId);
+    t('move keeps _LegacyLibInsight when the target has the column', [sp.headers.includes('_LegacyLibInsight'), movedRow?.[sp.headers.indexOf('_LegacyLibInsight')]], [true, 'Yes']);
+
+    // New year: the Term Year dropdown lists the new terms.
+    const pplan = { ...plan, moveIds: [], lists: L };
+    const pafter = await pst.startNewYear(pplan);
+    t('new year term dropdown updated', listAt(pafter.active.id, pbe.books[pafter.active.id].validation['tbl_FALL27:Term Year'].source), ['Fall 2027', 'Winter 2027', 'Spring 2028', 'Summer 2028']);
+
+    document.getElementById('summary').innerHTML = `<p class="${fail ? 'fail' : 'pass'}">${pass} passed, ${fail} failed</p>`;
+    document.title = `${fail ? 'FAIL' : 'PASS'} ${pass}/${pass + fail}`;
+  </script>
+</body>
+</html>

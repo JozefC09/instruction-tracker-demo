@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Instruction Tracker · Trexler Library</title>
+  <meta name="robots" content="noindex">
+  <link rel="stylesheet" href="css/app.css">
+  <script src="config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.27.0/lib/msal-browser.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">TL</span>
+      <div>
+        <div class="brand-title">Instruction Tracker</div>
+        <div class="brand-sub">Trexler Library</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="sync-status" class="sync" aria-live="polite"></span>
+      <span id="user-name" class="user"></span>
+      <button id="btn-signout" class="btn ghost small" hidden>Sign out</button>
+    </div>
+  </header>
+  <div id="banner" class="banner" hidden></div>
+  <div class="layout">
+    <nav class="sidenav" id="sidenav" aria-label="Main" hidden>
+      <a href="#/dashboard" data-route="dashboard">Dashboard</a>
+      <a href="#/sessions" data-route="sessions">Sessions</a>
+      <a href="#/requests" data-route="requests">Requests <span id="req-count" class="pill" hidden></span></a>
+      <a href="#/tours" data-route="tours">Tours</a>
+      <a href="#/settings" data-route="settings">Settings</a>
+    </nav>
+    <main id="main" tabindex="-1"></main>
+  </div>
+  <aside id="drawer" class="drawer" aria-hidden="true" aria-label="Session editor"></aside>
+  <div id="drawer-scrim" class="scrim" hidden></div>
+  <dialog id="dialog"></dialog>
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+</body>
+</html>

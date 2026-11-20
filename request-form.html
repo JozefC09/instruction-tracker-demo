@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Request a Library Instruction Session</title>
+  <link rel="stylesheet" href="css/app.css">
+  <style>
+    body { background: var(--bg); }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 24px 16px 48px; }
+    form.card { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; }
+    form .full { grid-column: 1 / -1; }
+    @media (max-width: 600px) { form.card { grid-template-columns: 1fr; } }
+    .req::after { content: " *"; color: var(--critical-text); }
+    .done { text-align: center; padding: 40px 16px; }
+  </style>
+  <script src="config.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Request a library instruction session</h1>
+    <p class="muted">Trexler Library librarians can teach research skills for your course. Tell us about your class and a librarian will contact you to confirm.</p>
+    <form class="card" id="f" novalidate>
+      <label class="field"><span class="req">Your name</span><input name="Faculty Name" required autocomplete="name"></label>
+      <label class="field"><span class="req">DeSales email</span><input name="Faculty Email" type="email" required autocomplete="email"></label>
+      <label class="field"><span class="req">Course #</span><input name="Course #" required placeholder="EN 103"></label>
+      <label class="field">College/School<select name="College/School" id="sel-college"><option value=""></option></select></label>
+      <label class="field"><span class="req">Students are</span><select name="Student Type" id="sel-type" required><option value=""></option></select></label>
+      <label class="field">Expected # of students<input name="# Students" type="number" min="0" step="1"></label>
+      <label class="field"><span class="req">Preferred date</span><input name="Preferred Date" type="date" required></label>
+      <label class="field">Alternate date<input name="Alternate Date" type="date"></label>
+      <label class="field">Class time<input name="Time" placeholder="e.g. MWF 10:00–10:50"></label>
+      <label class="field"><span class="req">Format</span><select name="Session Format" id="sel-format" required><option value=""></option></select></label>
+      <label class="field full">Location (room, Teams, online course)<input name="Location"></label>
+      <label class="field full">What should students learn? Assignment, topics, databases<textarea name="Notes / Goals" rows="4"></textarea></label>
+      <div class="full row"><button class="btn primary" type="submit" id="btn">Send request</button><span class="err" id="err" role="alert"></span></div>
+    </form>
+  </div>
+  <script>
+    // Posts to a Power Automate "When an HTTP request is received" flow, which adds the row to tbl_Requests
+    // (spec §9). The page never touches SharePoint directly and needs no Microsoft 365 sign-in.
+    const cfg = window.TRACKER_CONFIG || {};
+    const L = cfg.lists || {};
+    const fill = (id, list) => { for (const v of list || []) document.getElementById(id).add(new Option(v, v)); };
+    fill('sel-college', L.colleges);
+    fill('sel-type', L.studentTypes);
+    fill('sel-format', L.sessionFormats);
+
+    const form = document.getElementById('f');
+    const err = document.getElementById('err');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      const missing = [...form.querySelectorAll('[required]')].filter((el) => !el.value.trim());
+      if (missing.length) {
+        err.textContent = 'Please fill in the required fields.';
+        missing[0].focus();
+        return;
+      }
+      if (!/@/.test(form['Faculty Email'].value)) { err.textContent = 'Please enter a valid email.'; return; }
+      const body = Object.fromEntries(new FormData(form).entries());
+      const toUs = (iso) => (iso ? `${+iso.slice(5, 7)}/${+iso.slice(8, 10)}/${iso.slice(0, 4)}` : '');
+      body['Preferred Date'] = toUs(body['Preferred Date']);
+      body['Alternate Date'] = toUs(body['Alternate Date']);
+      body['Request ID'] = 'R-' + Date.now().toString(36).toUpperCase();
+      body['Submitted At'] = new Date().toISOString();
+      body.Status = 'New';
+      const btn = document.getElementById('btn');
+      btn.disabled = true;
+      try {
+        if (!cfg.requestFlowUrl) throw new Error('The request form isn’t connected yet. Please email the library instead.');
+        const res = await fetch(cfg.requestFlowUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (!res.ok) throw new Error(`The request couldn’t be sent (error ${res.status}). Please try again or email the library.`);
+        form.outerHTML = `<div class="card done"><h2>Thank you, your request was sent</h2><p class="muted">Reference ${body['Request ID']}. A librarian will contact you at ${body['Faculty Email'].replace(/[<>&]/g, '')} to confirm.</p></div>`;
+      } catch (ex) {
+        err.textContent = ex.message;
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
